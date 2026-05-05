@@ -1,0 +1,32 @@
+{
+  "name": "acp-brain",
+  "version": "0.2.0",
+  "description": "ACP Brain — Persistent AI memory layer backed by PostgreSQL + pgvector + Amazon Nova Embeddings. MCP server for ACP agents.",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "start": "tsx src/index.ts",
+    "dev": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@aws-sdk/client-bedrock-runtime": "^3.782.0",
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "pg": "^8.13.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/pg": "^8.11.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.8.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "BSL-1.1",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/genedragon/acp-brain"
+  }
+}
