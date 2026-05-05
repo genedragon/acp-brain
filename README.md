@@ -130,6 +130,17 @@ ACP Brain is a **curated** store — not a dump. The intended workflow:
 
 This ensures the knowledge base stays high-signal. Operational noise stays in agent workspace files.
 
+## Inspiration & Credits
+
+ACP Brain builds on the **Open Brain** concept pioneered by [Nate B. Jones](https://www.natebjones.com/) — a database-backed, MCP-connected personal knowledge system where any AI can query your accumulated context through a single open protocol.
+
+**Learn more:**
+- [Open Brain concept & community](https://aifor.dev/concepts/open-brain)
+- [Nate's introduction post](https://natesnewsletter.substack.com/p/every-ai-you-use-forgets-you-heres) — the "why" behind persistent AI memory
+- [Open Brain on GitHub (OB1)](https://github.com/NateBJones-Projects/OB1)
+
+ACP Brain extends this foundation with Amazon Bedrock embeddings, Zulip-integrated agent workflows, and a curated (vs. append-only) knowledge model.
+
 ## License
 
 BSL 1.1 (same as ACP platform)
