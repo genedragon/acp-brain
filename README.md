@@ -143,4 +143,4 @@ ACP Brain extends this foundation with Amazon Bedrock embeddings, Zulip-integrat
 
 ## License
 
-BSL 1.1 (same as ACP platform)
+MIT
