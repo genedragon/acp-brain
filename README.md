@@ -1,6 +1,6 @@
 # ACP Brain — Persistent AI Memory Layer
 
-Curated knowledge store for ACP agents. PostgreSQL + pgvector + Amazon Nova Embeddings, served via MCP (Model Context Protocol).
+Curated knowledge store for ACP users and agents. PostgreSQL + pgvector + Amazon Nova Embeddings, served via MCP (Model Context Protocol).
 
 ## What It Is
 
