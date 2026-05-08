@@ -10,30 +10,55 @@ ACP Brain is a **curated knowledge layer** for ACP. Unlike agent workspace files
 
 ## Architecture
 
-```
-┌──────────────────────────────────────────┐
-│ ACP Instance                              │
-│                                           │
-│  OpenClaw agents ──► ACP Brain MCP Server │
-│  (opusBot, botWard,     │                 │
-│   sysAdmin, etc.)       ▼                 │
-│                    PostgreSQL 16           │
-│                    + pgvector (HNSW)       │
-│                    + Amazon Nova embeddings│
-│                    (via Bedrock)           │
-└──────────────────────────────────────────┘
-```
+<p align="center">
+  <img src="docs/architecture.svg" alt="acp-brain architecture" width="580">
+</p>
 
-## Tools (6)
+## Tools (14)
+
+### Core Tools
 
 | Tool | Purpose |
 |------|---------|
-| `add_thought` | Store a thought with auto-generated embedding |
-| `search_thoughts` | Semantic vector search with optional filters |
-| `list_thoughts` | Browse by type, tag, and date range |
+| `add_thought` | Store a thought with embedding + provenance tracking |
+| `search_thoughts` | Semantic vector search (excludes pending by default) |
+| `list_thoughts` | Browse by type, tag, date, memory class, review status |
 | `update_thought` | Edit content or metadata (re-embeds on content change) |
-| `delete_thought` | Remove a thought by UUID |
+| `delete_thought` | Remove a thought by UUID (captures audit snapshot) |
 | `get_context_for` | Aggregation — everything the brain knows about a topic |
+
+### Safe Agent Memory (Review Queue)
+
+| Tool | Purpose |
+|------|---------|
+| `review_pending` | List thoughts awaiting human approval |
+| `approve_thought` | Approve a pending thought |
+| `reject_thought` | Reject with reason (kept for audit, hidden from search) |
+
+### Audit & Observability
+
+| Tool | Purpose |
+|------|---------|
+| `audit_log` | Query full provenance trail (who/what/when) |
+| `memory_stats` | Usage breakdown by class, source, status, agent |
+| `get_write_policy` | View current review policy |
+| `update_write_policy` | Modify policy at runtime |
+| `purge_rejected` | Retention cleanup for rejected thoughts |
+
+## Safe Agent Memory Contract
+
+Every write to ACP Brain is classified:
+
+| Memory Class | Description | Agent Write Behavior |
+|-------------|-------------|---------------------|
+| `evidence` | Facts, outcomes, meeting notes | Auto-approved |
+| `observation` | Inferred patterns, lower certainty | Auto-approved |
+| `instruction` | Behavioral rules, preferences | **Held for review** |
+
+Every write carries provenance:
+- `write_source` — `user`, `agent`, or `system`
+- `write_agent` — agent identifier (e.g. `stam-weekly-2x2`)
+- Full audit trail in `memory_audit_log`
 
 ## Thought Types
 
@@ -68,7 +93,11 @@ export DATABASE_URL="postgresql://localhost:5432/openbrain"
 export AWS_REGION="us-west-2"
 export ACP_BRAIN_DEFAULT_OWNER="your-username"
 
-# 4. Start the MCP server
+# 4. (Optional) Configure write policy
+export ACP_BRAIN_TRUSTED_AGENTS="quickwork,sync-my-2x2"
+export ACP_BRAIN_MAX_DAILY_WRITES=100
+
+# 5. Start the MCP server
 npm start
 ```
 
@@ -79,6 +108,8 @@ npm start
 | `DATABASE_URL` | `postgresql://localhost:5432/openbrain` | PostgreSQL connection string |
 | `AWS_REGION` | `us-east-1` | AWS region for Bedrock |
 | `ACP_BRAIN_DEFAULT_OWNER` | `default` | Default `source_owner` for new thoughts |
+| `ACP_BRAIN_TRUSTED_AGENTS` | (empty) | Comma-separated agent names that bypass review |
+| `ACP_BRAIN_MAX_DAILY_WRITES` | `100` | Max writes per agent per day |
 
 ## OpenClaw MCP Configuration
 
@@ -93,7 +124,8 @@ Add to your `openclaw.json` to give agents access:
       "env": {
         "DATABASE_URL": "postgresql://localhost:5432/openbrain",
         "AWS_REGION": "us-west-2",
-        "ACP_BRAIN_DEFAULT_OWNER": "your-username"
+        "ACP_BRAIN_DEFAULT_OWNER": "your-username",
+        "ACP_BRAIN_TRUSTED_AGENTS": "quickwork,sync-my-2x2"
       }
     }
   }
@@ -102,7 +134,7 @@ Add to your `openclaw.json` to give agents access:
 
 ## Schema
 
-Single table: `thoughts`
+### `thoughts` table
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -117,18 +149,38 @@ Single table: `thoughts`
 | `confidence` | DECIMAL | Optional confidence score (0.00–1.00) |
 | `metadata` | JSONB | Extensible type-specific fields |
 | `embedding` | VECTOR(1024) | Amazon Nova 1024-dim embedding |
+| `write_source` | TEXT | Who wrote: user, agent, system |
+| `write_agent` | TEXT | Agent identifier |
+| `memory_class` | TEXT | evidence, observation, instruction |
+| `review_status` | TEXT | pending, approved, rejected, auto_approved |
+| `reviewed_at` | TIMESTAMPTZ | When reviewed |
+| `reviewed_by` | TEXT | Who reviewed |
 | `created_at` | TIMESTAMPTZ | Auto-set on insert |
 | `updated_at` | TIMESTAMPTZ | Auto-updated on modification |
 
+### `memory_audit_log` table
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | UUID | Primary key |
+| `thought_id` | UUID | Reference to thought |
+| `action` | TEXT | created, updated, approved, rejected, deleted |
+| `actor` | TEXT | Who performed the action |
+| `actor_type` | TEXT | user, agent, system |
+| `reason` | TEXT | Why (especially for rejections) |
+| `snapshot` | JSONB | Thought content at time of action |
+| `created_at` | TIMESTAMPTZ | When |
+
 ## Curation Model
 
-ACP Brain is a **curated** store — not a dump. The intended workflow:
+ACP Brain uses a **Safe Agent Memory Contract**:
 
-1. **Agent proposes** a thought worth saving (based on conversation context)
-2. **Human reviews** (or agent saves autonomously for high-confidence items)
-3. **Thought is stored** with proper type, tags, and source attribution
+1. **Evidence & observations** — agents write freely (auto-approved)
+2. **Instructions** — agents propose, humans approve (review queue)
+3. **All writes are audited** — full provenance trail in `memory_audit_log`
+4. **Rejected thoughts persist** — hidden from search but kept for audit (purge after 30 days)
 
-This ensures the knowledge base stays high-signal. Operational noise stays in agent workspace files.
+This ensures agents can't self-grant behavioral rules while still allowing them to record facts autonomously.
 
 ## Inspiration & Credits
 
@@ -139,7 +191,7 @@ ACP Brain builds on the **Open Brain** concept pioneered by [Nate B. Jones](http
 - [Nate's introduction post](https://natesnewsletter.substack.com/p/every-ai-you-use-forgets-you-heres) — the "why" behind persistent AI memory
 - [Open Brain on GitHub (OB1)](https://github.com/NateBJones-Projects/OB1)
 
-ACP Brain extends this foundation with Amazon Bedrock embeddings, Zulip-integrated agent workflows, and a curated (vs. append-only) knowledge model.
+ACP Brain extends this foundation with Amazon Bedrock embeddings, Zulip-integrated agent workflows, a Safe Agent Memory Contract, and a curated (vs. append-only) knowledge model.
 
 ## License
 
