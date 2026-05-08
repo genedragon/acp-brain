@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS thoughts (
     review_status    TEXT DEFAULT 'auto_approved', -- 'pending' | 'approved' | 'rejected' | 'auto_approved'
     reviewed_at      TIMESTAMPTZ,
     reviewed_by      TEXT,
+    content_fingerprint TEXT,              -- MD5 of normalized content (dedup)
     -- Timestamps
     created_at       TIMESTAMPTZ DEFAULT NOW(),
     updated_at       TIMESTAMPTZ DEFAULT NOW()
@@ -39,6 +40,7 @@ CREATE INDEX IF NOT EXISTS idx_thoughts_review_status ON thoughts(review_status)
 CREATE INDEX IF NOT EXISTS idx_thoughts_memory_class ON thoughts(memory_class);
 CREATE INDEX IF NOT EXISTS idx_thoughts_write_source ON thoughts(write_source);
 CREATE INDEX IF NOT EXISTS idx_thoughts_write_agent ON thoughts(write_agent);
+CREATE INDEX IF NOT EXISTS idx_thoughts_fingerprint ON thoughts(content_fingerprint);
 
 -- HNSW index for vector similarity search (no training data needed)
 CREATE INDEX IF NOT EXISTS idx_thoughts_embedding ON thoughts USING hnsw(embedding vector_cosine_ops);

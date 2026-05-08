@@ -1,5 +1,4 @@
 import { z } from "zod";
-import { createHash } from "node:crypto";
 import { query } from "./db.js";
 import { generateEmbedding, toPgVector } from "./embeddings.js";
 
@@ -90,15 +89,6 @@ function determineReviewStatus(
   }
 
   return "auto_approved";
-}
-
-// ---------------------------------------------------------------------------
-// Fingerprint helper
-// ---------------------------------------------------------------------------
-
-function generateFingerprint(content: string): string {
-  const normalized = content.trim().toLowerCase().replace(/\s+/g, " ");
-  return createHash("md5").update(normalized, "utf-8").digest("hex");
 }
 
 // ---------------------------------------------------------------------------
@@ -302,11 +292,21 @@ export async function addThought(
     args.write_agent,
   );
 
-  const fingerprint = generateFingerprint(args.content);
+  // Vector-based near-duplicate check (warn, not block)
+  const SIMILARITY_THRESHOLD = parseFloat(process.env.ACP_BRAIN_DEDUP_THRESHOLD ?? "0.92");
+  const nearDupes = await query<{ id: string; title: string | null; similarity: number }>(
+    `SELECT id, title, 1 - (embedding <=> $1) AS similarity
+     FROM thoughts
+     WHERE 1 - (embedding <=> $1) > $2
+       AND review_status IN ('approved', 'auto_approved')
+     ORDER BY embedding <=> $1
+     LIMIT 3`,
+    [toPgVector(embedding), SIMILARITY_THRESHOLD],
+  );
 
   const result = await query<ThoughtRow>(
-    `INSERT INTO thoughts (content, type, title, tags, source_platform, source_owner, source_ref, metadata, embedding, write_source, write_agent, memory_class, review_status, content_fingerprint)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+    `INSERT INTO thoughts (content, type, title, tags, source_platform, source_owner, source_ref, metadata, embedding, write_source, write_agent, memory_class, review_status)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
      RETURNING *`,
     [
       args.content,
@@ -322,7 +322,6 @@ export async function addThought(
       args.write_agent ?? null,
       args.memory_class,
       reviewStatus,
-      fingerprint,
     ],
   );
 
@@ -342,6 +341,16 @@ export async function addThought(
     ...formatThought(thought),
     _note: reviewStatus === "pending"
       ? "This thought is pending review. It will not appear in search results until approved."
+      : undefined,
+    _near_duplicates: nearDupes.rows.length > 0
+      ? {
+          warning: "This thought is semantically similar to existing thoughts. Consider reviewing for duplicates.",
+          similar: nearDupes.rows.map((r) => ({
+            id: r.id,
+            title: r.title,
+            similarity: Math.round(r.similarity * 1000) / 1000,
+          })),
+        }
       : undefined,
   };
 }
@@ -828,52 +837,51 @@ export const FindDuplicatesSchema = z.object({
     .number()
     .min(0)
     .max(1)
-    .default(0.95)
-    .describe("Cosine similarity threshold for considering thoughts as duplicates (0.95 = very similar)"),
+    .default(0.92)
+    .describe("Cosine similarity threshold (0.92 = semantically very similar, 0.99 = near-identical)"),
   limit: z.number().int().min(1).max(100).default(20).describe("Max duplicate pairs to return"),
-  dry_run: z.boolean().default(true).describe("If true, only report duplicates without merging"),
-  auto_merge: z.boolean().default(false).describe("If true and dry_run=false, keep the newer thought and delete the older one"),
+  dry_run: z.boolean().default(true).describe("If true, only report duplicates. If false, deletes the older thought in each pair."),
 });
 
 export async function findDuplicates(
   args: z.infer<typeof FindDuplicatesSchema>,
 ): Promise<{ duplicates: Record<string, unknown>[]; count: number; action: string }> {
-  // Find thoughts with matching fingerprints (exact content dupes)
-  const exactDupes = await query<{ fingerprint: string; count: string; ids: string[] }>(
-    `SELECT content_fingerprint AS fingerprint, COUNT(*) AS count, 
-            array_agg(id ORDER BY created_at DESC) AS ids
-     FROM thoughts
-     WHERE content_fingerprint IS NOT NULL
-       AND review_status IN ('approved', 'auto_approved')
-     GROUP BY content_fingerprint
-     HAVING COUNT(*) > 1
-     ORDER BY COUNT(*) DESC
-     LIMIT $1`,
-    [args.limit],
+  // Vector-based semantic dedup — find thought pairs above similarity threshold
+  const vectorDupes = await query<{ id_a: string; id_b: string; title_a: string | null; title_b: string | null; created_a: string; created_b: string; similarity: number }>(
+    `SELECT a.id AS id_a, b.id AS id_b, a.title AS title_a, b.title AS title_b,
+            a.created_at AS created_a, b.created_at AS created_b,
+            1 - (a.embedding <=> b.embedding) AS similarity
+     FROM thoughts a, thoughts b
+     WHERE a.id < b.id
+       AND a.review_status IN ('approved', 'auto_approved')
+       AND b.review_status IN ('approved', 'auto_approved')
+       AND 1 - (a.embedding <=> b.embedding) > $1
+     ORDER BY similarity DESC
+     LIMIT $2`,
+    [args.threshold, args.limit],
   );
 
-  const duplicates = exactDupes.rows.map((row) => ({
-    fingerprint: row.fingerprint,
-    count: parseInt(row.count, 10),
-    ids: row.ids,
+  const duplicates = vectorDupes.rows.map((row) => ({
+    id_a: row.id_a,
+    id_b: row.id_b,
+    title_a: row.title_a,
+    title_b: row.title_b,
+    similarity: Math.round(row.similarity * 1000) / 1000,
+    older_id: row.created_a < row.created_b ? row.id_a : row.id_b,
   }));
 
-  // If not dry_run and auto_merge, delete older duplicates
-  if (!args.dry_run && args.auto_merge && duplicates.length > 0) {
+  if (!args.dry_run && duplicates.length > 0) {
     let deleted = 0;
-    for (const group of duplicates) {
-      // Keep the first (newest), delete the rest
-      const toDelete = group.ids.slice(1);
-      for (const id of toDelete) {
-        await auditLog(id as string, "deleted", "system", "system", "Duplicate detected — auto-merged");
-        await query("DELETE FROM thoughts WHERE id = $1", [id]);
-        deleted++;
-      }
+    for (const pair of duplicates) {
+      const olderId = pair.older_id as string;
+      await auditLog(olderId, "deleted", "system", "system", `Near-duplicate (similarity: ${pair.similarity}) — auto-merged`);
+      await query("DELETE FROM thoughts WHERE id = $1", [olderId]);
+      deleted++;
     }
     return { duplicates, count: deleted, action: "merged" };
   }
 
-  return { duplicates, count: duplicates.length, action: args.dry_run ? "dry_run" : "reported" };
+  return { duplicates, count: duplicates.length, action: "dry_run" };
 }
 
 // ---------------------------------------------------------------------------
