@@ -1,6 +1,6 @@
 {
   "name": "acp-brain",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "ACP Brain — Persistent AI memory layer backed by PostgreSQL + pgvector + Amazon Nova Embeddings. MCP server for ACP agents.",
   "type": "module",
   "main": "dist/index.js",
