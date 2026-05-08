@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { query } from "./db.js";
 import { generateEmbedding, toPgVector } from "./embeddings.js";
+import { generateText } from "./llm.js";
 
 // ---------------------------------------------------------------------------
 // Shared types
@@ -980,4 +981,206 @@ export async function autoCapture(
   }
 
   return { captured, count: captured.length };
+}
+
+// ---------------------------------------------------------------------------
+// Recipe 1: Daily Digest
+// ---------------------------------------------------------------------------
+
+export const DailyDigestSchema = z.object({
+  hours: z.number().default(24).describe("Look back N hours (default: 24)"),
+  include_pending: z.boolean().default(true).describe("Include pending-review items in the digest"),
+});
+
+export async function dailyDigest(
+  args: z.infer<typeof DailyDigestSchema>,
+): Promise<Record<string, unknown>> {
+  const cutoff = new Date(Date.now() - args.hours * 60 * 60 * 1000).toISOString();
+
+  // Recent thoughts
+  const recent = await query<ThoughtRow>(
+    `SELECT * FROM thoughts
+     WHERE created_at >= $1
+     ORDER BY created_at DESC`,
+    [cutoff],
+  );
+
+  // Pending review count
+  const pendingResult = await query<{ count: string }>(
+    `SELECT COUNT(*) AS count FROM thoughts WHERE review_status = 'pending'`,
+  );
+  const pendingCount = parseInt(pendingResult.rows[0].count, 10);
+
+  // Group by type
+  const byType: Record<string, number> = {};
+  const byAgent: Record<string, number> = {};
+  for (const row of recent.rows) {
+    byType[row.type] = (byType[row.type] ?? 0) + 1;
+    if (row.write_agent) {
+      byAgent[row.write_agent] = (byAgent[row.write_agent] ?? 0) + 1;
+    }
+  }
+
+  // Generate a natural language summary via LLM
+  const thoughtSummaries = recent.rows.slice(0, 20).map(
+    (r) => `[${r.type}] ${r.title ?? r.content.slice(0, 80)}`,
+  );
+
+  const summary = recent.rows.length > 0
+    ? await generateText(
+        `Summarize these recent brain entries in 3-5 bullet points for a morning briefing. Be concise and actionable:\n\n${thoughtSummaries.join("\n")}`,
+        { system: "You are a concise executive briefing assistant. Output only bullet points, no preamble.", maxTokens: 300 },
+      )
+    : "No new thoughts in the last " + args.hours + " hours.";
+
+  return {
+    period_hours: args.hours,
+    total_new: recent.rows.length,
+    pending_review: pendingCount,
+    by_type: byType,
+    by_agent: byAgent,
+    summary,
+    thoughts: recent.rows.slice(0, 10).map(formatThought),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Recipe 2: Schema-Aware Routing
+// ---------------------------------------------------------------------------
+
+export const SmartAddSchema = z.object({
+  content: z.string().describe("Raw unstructured text — the brain will auto-classify type, extract title, tags, and metadata"),
+  source_platform: z.string().optional().describe("Platform origin"),
+  source_owner: z.string().default(DEFAULT_OWNER),
+  source_ref: z.string().optional(),
+  write_source: z.enum(["user", "agent", "system"]).default("user"),
+  write_agent: z.string().optional(),
+});
+
+export async function smartAdd(
+  args: z.infer<typeof SmartAddSchema>,
+): Promise<Record<string, unknown>> {
+  // Use LLM to classify the content
+  const classification = await generateText(
+    `Classify this text and extract structured metadata. Return ONLY valid JSON, no markdown fences.
+
+Text: "${args.content}"
+
+Return JSON with these fields:
+- type: one of "note", "task", "person", "project", "idea", "decision"
+- title: short title (max 60 chars)
+- tags: array of 1-4 relevant tags (lowercase, hyphenated)
+- memory_class: "evidence" (facts/outcomes), "observation" (patterns), or "instruction" (rules/preferences)
+- metadata: object with type-specific fields (e.g. assignee, due_date, importance for tasks; org, role for persons)`,
+    { system: "You are a knowledge classification engine. Output ONLY valid JSON. No explanation.", maxTokens: 300, temperature: 0.0 },
+  );
+
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(classification.replace(/```json?\n?/g, "").replace(/```/g, "").trim());
+  } catch {
+    // Fallback if LLM doesn't return valid JSON
+    parsed = { type: "note", title: args.content.slice(0, 60), tags: [], memory_class: "evidence", metadata: {} };
+  }
+
+  // Now add the thought with the classified metadata
+  return addThought({
+    content: args.content,
+    type: (parsed.type as any) ?? "note",
+    title: (parsed.title as string) ?? undefined,
+    tags: (parsed.tags as string[]) ?? undefined,
+    source_platform: args.source_platform,
+    source_owner: args.source_owner,
+    source_ref: args.source_ref,
+    metadata: (parsed.metadata as Record<string, unknown>) ?? undefined,
+    write_source: args.write_source,
+    write_agent: args.write_agent,
+    memory_class: (parsed.memory_class as any) ?? "evidence",
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Recipe 3: Panning for Gold
+// ---------------------------------------------------------------------------
+
+export const PanForGoldSchema = z.object({
+  content: z.string().describe("Raw brain dump, meeting transcript, or voice memo text to mine for insights"),
+  source_platform: z.string().optional(),
+  source_ref: z.string().optional(),
+  write_agent: z.string().default("panning-for-gold"),
+  dry_run: z.boolean().default(true).describe("If true, return extracted items without storing. If false, store all to brain."),
+});
+
+export async function panForGold(
+  args: z.infer<typeof PanForGoldSchema>,
+): Promise<Record<string, unknown>> {
+  const extraction = await generateText(
+    `Extract actionable knowledge from this brain dump. Return ONLY valid JSON (no markdown fences).
+
+Text:
+"""
+${args.content}
+"""
+
+Return a JSON object with:
+- summary: 1-2 sentence overview of the dump
+- action_items: array of {title, assignee?, due_date?, importance: "high"|"medium"|"low"}
+- decisions: array of strings (key decisions made or implied)
+- people: array of {name, context} (people mentioned and why)
+- ideas: array of strings (ideas worth capturing)
+- key_facts: array of strings (factual statements worth remembering)`,
+    { system: "You are a knowledge extraction engine. Extract ALL actionable items. Output ONLY valid JSON.", maxTokens: 2000, temperature: 0.1 },
+  );
+
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(extraction.replace(/```json?\n?/g, "").replace(/```/g, "").trim());
+  } catch {
+    return { error: "Failed to parse LLM extraction", raw: extraction };
+  }
+
+  if (args.dry_run) {
+    return { ...parsed, action: "dry_run", note: "Pass dry_run=false to store these to the brain." };
+  }
+
+  // Store everything via auto_capture
+  const result = await autoCapture({
+    session_summary: (parsed.summary as string) ?? "Brain dump extraction",
+    action_items: (parsed.action_items as any[]) ?? [],
+    decisions: (parsed.decisions as string[]) ?? [],
+    people_mentioned: (parsed.people as any[]) ?? [],
+    source_platform: args.source_platform ?? "manual",
+    write_agent: args.write_agent,
+    source_ref: args.source_ref,
+  });
+
+  // Also store ideas and key facts as notes
+  const ideas = (parsed.ideas as string[]) ?? [];
+  const facts = (parsed.key_facts as string[]) ?? [];
+  for (const idea of ideas) {
+    await addThought({
+      content: idea,
+      type: "idea",
+      tags: ["panning-for-gold"],
+      write_source: "agent",
+      write_agent: args.write_agent,
+      memory_class: "observation",
+      source_platform: args.source_platform,
+      source_owner: DEFAULT_OWNER,
+    });
+  }
+  for (const fact of facts) {
+    await addThought({
+      content: fact,
+      type: "note",
+      tags: ["panning-for-gold", "key-fact"],
+      write_source: "agent",
+      write_agent: args.write_agent,
+      memory_class: "evidence",
+      source_platform: args.source_platform,
+      source_owner: DEFAULT_OWNER,
+    });
+  }
+
+  return { ...parsed, stored: result, ideas_stored: ideas.length, facts_stored: facts.length, action: "stored" };
 }

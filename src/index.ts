@@ -24,6 +24,9 @@ import {
   PurgeRejectedSchema,
   FindDuplicatesSchema,
   AutoCaptureSchema,
+  DailyDigestSchema,
+  SmartAddSchema,
+  PanForGoldSchema,
   addThought,
   searchThoughts,
   listThoughts,
@@ -40,6 +43,9 @@ import {
   purgeRejected,
   findDuplicates,
   autoCapture,
+  dailyDigest,
+  smartAdd,
+  panForGold,
 } from "./tools.js";
 
 // ---------------------------------------------------------------------------
@@ -376,6 +382,70 @@ server.registerTool(
   async (args) => {
     try {
       const result = await autoCapture(AutoCaptureSchema.parse(args));
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: `Error: ${(err as Error).message}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Recipes: Daily Digest, Schema-Aware Routing, Panning for Gold
+// ---------------------------------------------------------------------------
+
+server.registerTool(
+  "daily_digest",
+  {
+    description:
+      "Generate a morning briefing of recent brain activity. Summarizes new thoughts, groups by type/agent, counts pending reviews. Perfect for scheduled daily runs.",
+    inputSchema: DailyDigestSchema.shape,
+  },
+  async (args) => {
+    try {
+      const result = await dailyDigest(DailyDigestSchema.parse(args));
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: `Error: ${(err as Error).message}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.registerTool(
+  "smart_add",
+  {
+    description:
+      "Schema-aware routing — add unstructured text and let the brain auto-classify it into the right type (task/person/decision/note/idea/project) with extracted title, tags, and metadata. Uses LLM classification.",
+    inputSchema: SmartAddSchema.shape,
+  },
+  async (args) => {
+    try {
+      const result = await smartAdd(SmartAddSchema.parse(args));
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: `Error: ${(err as Error).message}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.registerTool(
+  "pan_for_gold",
+  {
+    description:
+      "Mine brain dumps, meeting transcripts, or voice memos for actionable knowledge. Extracts action items, decisions, people, ideas, and key facts. Use dry_run=true to preview before storing.",
+    inputSchema: PanForGoldSchema.shape,
+  },
+  async (args) => {
+    try {
+      const result = await panForGold(PanForGoldSchema.parse(args));
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     } catch (err) {
       return {
