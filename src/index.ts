@@ -1,7 +1,11 @@
 #!/usr/bin/env node
 
+import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
+import express from "express";
 import { shutdown } from "./db.js";
 import {
   AddThoughtSchema,
@@ -335,13 +339,92 @@ server.registerTool(
 );
 
 // ---------------------------------------------------------------------------
-// Start
+// Start — HTTP transport (runs as a persistent daemon)
 // ---------------------------------------------------------------------------
 
+const PORT = parseInt(process.env.ACP_BRAIN_PORT || "18790", 10);
+const transports: Record<string, StreamableHTTPServerTransport> = {};
+let httpServer: ReturnType<typeof import('http').createServer> | null = null;
+
 async function main() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error("acp-brain MCP server v0.3.0 running on stdio (Safe Agent Memory enabled)");
+  const app = express();
+  app.use(express.json());
+
+  // Health check
+  app.get("/health", (_req, res) => {
+    res.json({ status: "ok", service: "acp-brain", version: "0.3.0", transport: "http" });
+  });
+
+  // MCP POST endpoint
+  app.post("/mcp", async (req, res) => {
+    const sessionId = req.headers["mcp-session-id"] as string | undefined;
+    try {
+      let transport: StreamableHTTPServerTransport;
+      if (sessionId && transports[sessionId]) {
+        transport = transports[sessionId];
+      } else if (!sessionId && isInitializeRequest(req.body)) {
+        transport = new StreamableHTTPServerTransport({
+          sessionIdGenerator: () => randomUUID(),
+          onsessioninitialized: (sid) => {
+            transports[sid] = transport;
+          },
+        });
+        transport.onclose = () => {
+          const sid = transport.sessionId;
+          if (sid && transports[sid]) delete transports[sid];
+        };
+        await server.connect(transport);
+        await transport.handleRequest(req, res, req.body);
+        return;
+      } else {
+        res.status(400).json({
+          jsonrpc: "2.0",
+          error: { code: -32000, message: "Bad Request: No valid session ID" },
+          id: null,
+        });
+        return;
+      }
+      await transport.handleRequest(req, res, req.body);
+    } catch (error) {
+      console.error("Error handling MCP request:", error);
+      if (!res.headersSent) {
+        res.status(500).json({
+          jsonrpc: "2.0",
+          error: { code: -32603, message: "Internal server error" },
+          id: null,
+        });
+      }
+    }
+  });
+
+  // MCP GET endpoint (SSE streams)
+  app.get("/mcp", async (req, res) => {
+    const sessionId = req.headers["mcp-session-id"] as string | undefined;
+    if (!sessionId || !transports[sessionId]) {
+      res.status(400).send("Invalid or missing session ID");
+      return;
+    }
+    await transports[sessionId].handleRequest(req, res);
+  });
+
+  // MCP DELETE endpoint (session termination)
+  app.delete("/mcp", async (req, res) => {
+    const sessionId = req.headers["mcp-session-id"] as string | undefined;
+    if (!sessionId || !transports[sessionId]) {
+      res.status(400).send("Invalid or missing session ID");
+      return;
+    }
+    await transports[sessionId].handleRequest(req, res);
+  });
+
+  httpServer = app.listen(PORT);
+  httpServer.on('listening', () => {
+    console.error(`acp-brain MCP server v0.3.0 running on stdio (Safe Agent Memory enabled)`);
+    console.error(`HTTP transport listening on port ${PORT}`);
+  });
+
+  // Keep the event loop alive
+  await new Promise(() => {});
 }
 
 main().catch((err) => {
@@ -351,8 +434,16 @@ main().catch((err) => {
 
 // Graceful shutdown
 process.on("SIGINT", () => {
+  for (const sid in transports) {
+    transports[sid].close?.();
+    delete transports[sid];
+  }
   shutdown().finally(() => process.exit(0));
 });
 process.on("SIGTERM", () => {
+  for (const sid in transports) {
+    transports[sid].close?.();
+    delete transports[sid];
+  }
   shutdown().finally(() => process.exit(0));
 });
