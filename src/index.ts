@@ -48,7 +48,7 @@ import {
 
 const server = new McpServer({
   name: "acp-brain",
-  version: "0.3.0",
+  version: "0.4.0",
 });
 
 // ---------------------------------------------------------------------------
@@ -400,7 +400,7 @@ async function main() {
 
   // Health check
   app.get("/health", (_req, res) => {
-    res.json({ status: "ok", service: "acp-brain", version: "0.3.0", transport: "http" });
+    res.json({ status: "ok", service: "acp-brain", version: "0.4.0", transport: "http" });
   });
 
   // MCP POST endpoint
@@ -467,7 +467,7 @@ async function main() {
 
   httpServer = app.listen(PORT);
   httpServer.on('listening', () => {
-    console.error(`acp-brain MCP server v0.3.0 running on stdio (Safe Agent Memory enabled)`);
+    console.error(`acp-brain MCP server v0.4.0 running on http://0.0.0.0:${PORT} (Safe Agent Memory enabled)`);
     console.error(`HTTP transport listening on port ${PORT}`);
   });
 
