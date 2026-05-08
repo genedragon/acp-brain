@@ -22,6 +22,8 @@ import {
   GetWritePolicySchema,
   UpdateWritePolicySchema,
   PurgeRejectedSchema,
+  FindDuplicatesSchema,
+  AutoCaptureSchema,
   addThought,
   searchThoughts,
   listThoughts,
@@ -36,6 +38,8 @@ import {
   getWritePolicy,
   updateWritePolicy,
   purgeRejected,
+  findDuplicates,
+  autoCapture,
 } from "./tools.js";
 
 // ---------------------------------------------------------------------------
@@ -328,6 +332,50 @@ server.registerTool(
   async (args) => {
     try {
       const result = await purgeRejected(PurgeRejectedSchema.parse(args));
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: `Error: ${(err as Error).message}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Phase 3: Dedup & Auto-Capture tools
+// ---------------------------------------------------------------------------
+
+server.registerTool(
+  "find_duplicates",
+  {
+    description:
+      "Detect duplicate thoughts via content fingerprinting. Supports dry_run (report only) and auto_merge (keep newest, delete older). Run with dry_run=true first to preview.",
+    inputSchema: FindDuplicatesSchema.shape,
+  },
+  async (args) => {
+    try {
+      const result = await findDuplicates(FindDuplicatesSchema.parse(args));
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: `Error: ${(err as Error).message}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.registerTool(
+  "auto_capture",
+  {
+    description:
+      "Standardized session-end capture. Agents call this at session close to store: session summary, action items, decisions, and people mentioned. All stored as evidence with proper provenance.",
+    inputSchema: AutoCaptureSchema.shape,
+  },
+  async (args) => {
+    try {
+      const result = await autoCapture(AutoCaptureSchema.parse(args));
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     } catch (err) {
       return {

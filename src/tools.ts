@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { createHash } from "node:crypto";
 import { query } from "./db.js";
 import { generateEmbedding, toPgVector } from "./embeddings.js";
 
@@ -89,6 +90,15 @@ function determineReviewStatus(
   }
 
   return "auto_approved";
+}
+
+// ---------------------------------------------------------------------------
+// Fingerprint helper
+// ---------------------------------------------------------------------------
+
+function generateFingerprint(content: string): string {
+  const normalized = content.trim().toLowerCase().replace(/\s+/g, " ");
+  return createHash("md5").update(normalized, "utf-8").digest("hex");
 }
 
 // ---------------------------------------------------------------------------
@@ -292,9 +302,11 @@ export async function addThought(
     args.write_agent,
   );
 
+  const fingerprint = generateFingerprint(args.content);
+
   const result = await query<ThoughtRow>(
-    `INSERT INTO thoughts (content, type, title, tags, source_platform, source_owner, source_ref, metadata, embedding, write_source, write_agent, memory_class, review_status)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+    `INSERT INTO thoughts (content, type, title, tags, source_platform, source_owner, source_ref, metadata, embedding, write_source, write_agent, memory_class, review_status, content_fingerprint)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
      RETURNING *`,
     [
       args.content,
@@ -310,6 +322,7 @@ export async function addThought(
       args.write_agent ?? null,
       args.memory_class,
       reviewStatus,
+      fingerprint,
     ],
   );
 
@@ -804,4 +817,159 @@ export async function purgeRejected(
   }
 
   return { count, dry_run: args.dry_run };
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3a: Fingerprint Dedup
+// ---------------------------------------------------------------------------
+
+export const FindDuplicatesSchema = z.object({
+  threshold: z
+    .number()
+    .min(0)
+    .max(1)
+    .default(0.95)
+    .describe("Cosine similarity threshold for considering thoughts as duplicates (0.95 = very similar)"),
+  limit: z.number().int().min(1).max(100).default(20).describe("Max duplicate pairs to return"),
+  dry_run: z.boolean().default(true).describe("If true, only report duplicates without merging"),
+  auto_merge: z.boolean().default(false).describe("If true and dry_run=false, keep the newer thought and delete the older one"),
+});
+
+export async function findDuplicates(
+  args: z.infer<typeof FindDuplicatesSchema>,
+): Promise<{ duplicates: Record<string, unknown>[]; count: number; action: string }> {
+  // Find thoughts with matching fingerprints (exact content dupes)
+  const exactDupes = await query<{ fingerprint: string; count: string; ids: string[] }>(
+    `SELECT content_fingerprint AS fingerprint, COUNT(*) AS count, 
+            array_agg(id ORDER BY created_at DESC) AS ids
+     FROM thoughts
+     WHERE content_fingerprint IS NOT NULL
+       AND review_status IN ('approved', 'auto_approved')
+     GROUP BY content_fingerprint
+     HAVING COUNT(*) > 1
+     ORDER BY COUNT(*) DESC
+     LIMIT $1`,
+    [args.limit],
+  );
+
+  const duplicates = exactDupes.rows.map((row) => ({
+    fingerprint: row.fingerprint,
+    count: parseInt(row.count, 10),
+    ids: row.ids,
+  }));
+
+  // If not dry_run and auto_merge, delete older duplicates
+  if (!args.dry_run && args.auto_merge && duplicates.length > 0) {
+    let deleted = 0;
+    for (const group of duplicates) {
+      // Keep the first (newest), delete the rest
+      const toDelete = group.ids.slice(1);
+      for (const id of toDelete) {
+        await auditLog(id as string, "deleted", "system", "system", "Duplicate detected — auto-merged");
+        await query("DELETE FROM thoughts WHERE id = $1", [id]);
+        deleted++;
+      }
+    }
+    return { duplicates, count: deleted, action: "merged" };
+  }
+
+  return { duplicates, count: duplicates.length, action: args.dry_run ? "dry_run" : "reported" };
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3b: Auto-Capture Protocol
+// ---------------------------------------------------------------------------
+
+export const AutoCaptureSchema = z.object({
+  session_summary: z
+    .string()
+    .describe("1-2 sentence summary of what happened in this session"),
+  action_items: z
+    .array(
+      z.object({
+        title: z.string().describe("Action item title"),
+        assignee: z.string().optional().describe("Who owns this action"),
+        due_date: z.string().optional().describe("Due date (ISO format)"),
+        importance: z.enum(["high", "medium", "low"]).default("medium"),
+      }),
+    )
+    .optional()
+    .describe("Action items extracted from the session"),
+  decisions: z
+    .array(z.string())
+    .optional()
+    .describe("Key decisions made during the session"),
+  people_mentioned: z
+    .array(
+      z.object({
+        name: z.string(),
+        context: z.string().optional().describe("Why they were mentioned"),
+      }),
+    )
+    .optional()
+    .describe("People referenced in the session"),
+  source_platform: z.string().default("openclaw").describe("Platform this capture came from"),
+  write_agent: z.string().describe("Agent performing the capture (e.g. 'opusBot', 'botWard')"),
+  source_ref: z.string().optional().describe("Link to the session/thread"),
+});
+
+export async function autoCapture(
+  args: z.infer<typeof AutoCaptureSchema>,
+): Promise<{ captured: string[]; count: number }> {
+  const captured: string[] = [];
+
+  // 1. Session summary → note
+  const summaryResult = await addThought({
+    content: args.session_summary,
+    type: "note",
+    title: `Session summary (${new Date().toISOString().slice(0, 10)})`,
+    tags: ["session-summary", "auto-capture"],
+    source_platform: args.source_platform,
+    source_owner: DEFAULT_OWNER,
+    source_ref: args.source_ref,
+    write_source: "agent",
+    write_agent: args.write_agent,
+    memory_class: "evidence",
+  });
+  captured.push(`note: ${(summaryResult as any).id}`);
+
+  // 2. Action items → tasks
+  if (args.action_items && args.action_items.length > 0) {
+    for (const item of args.action_items) {
+      const result = await addThought({
+        content: `Action item: ${item.title}${item.assignee ? ` (assignee: ${item.assignee})` : ""}`,
+        type: "task",
+        title: item.title,
+        tags: ["action-item", "auto-capture"],
+        source_platform: args.source_platform,
+        source_owner: DEFAULT_OWNER,
+        source_ref: args.source_ref,
+        metadata: { assignee: item.assignee, due_date: item.due_date, importance: item.importance, completed: false },
+        write_source: "agent",
+        write_agent: args.write_agent,
+        memory_class: "evidence",
+      });
+      captured.push(`task: ${(result as any).id}`);
+    }
+  }
+
+  // 3. Decisions → decision type
+  if (args.decisions && args.decisions.length > 0) {
+    for (const decision of args.decisions) {
+      const result = await addThought({
+        content: decision,
+        type: "decision",
+        tags: ["auto-capture"],
+        source_platform: args.source_platform,
+        source_owner: DEFAULT_OWNER,
+        source_ref: args.source_ref,
+        write_source: "agent",
+        write_agent: args.write_agent,
+        memory_class: "evidence",
+      });
+      captured.push(`decision: ${(result as any).id}`);
+    }
+  }
+
+  return { captured, count: captured.length };
 }
