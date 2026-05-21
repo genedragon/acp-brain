@@ -540,10 +540,7 @@ export async function deleteThought(
     formatThought(existing.rows[0]) as Record<string, unknown>,
   );
 
-  const result = await query(
-    "DELETE FROM thoughts WHERE id = $1 RETURNING id",
-    [args.id],
-  );
+  await query("DELETE FROM thoughts WHERE id = $1", [args.id]);
   return { deleted: true, id: args.id };
 }
 
@@ -940,7 +937,7 @@ export async function autoCapture(
     write_agent: args.write_agent,
     memory_class: "evidence",
   });
-  captured.push(`note: ${(summaryResult as any).id}`);
+  captured.push(`note: ${summaryResult.id as string}`);
 
   // 2. Action items → tasks
   if (args.action_items && args.action_items.length > 0) {
@@ -958,7 +955,7 @@ export async function autoCapture(
         write_agent: args.write_agent,
         memory_class: "evidence",
       });
-      captured.push(`task: ${(result as any).id}`);
+      captured.push(`task: ${result.id as string}`);
     }
   }
 
@@ -976,7 +973,7 @@ export async function autoCapture(
         write_agent: args.write_agent,
         memory_class: "evidence",
       });
-      captured.push(`decision: ${(result as any).id}`);
+      captured.push(`decision: ${result.id as string}`);
     }
   }
 
@@ -1084,9 +1081,18 @@ Return JSON with these fields:
   }
 
   // Now add the thought with the classified metadata
+  const validTypes = ["note", "task", "person", "project", "idea", "decision"] as const;
+  const validClasses = ["evidence", "observation", "instruction"] as const;
+  const parsedType = validTypes.includes(parsed.type as typeof validTypes[number])
+    ? (parsed.type as typeof validTypes[number])
+    : "note";
+  const parsedClass = validClasses.includes(parsed.memory_class as typeof validClasses[number])
+    ? (parsed.memory_class as typeof validClasses[number])
+    : "evidence";
+
   return addThought({
     content: args.content,
-    type: (parsed.type as any) ?? "note",
+    type: parsedType,
     title: (parsed.title as string) ?? undefined,
     tags: (parsed.tags as string[]) ?? undefined,
     source_platform: args.source_platform,
@@ -1095,7 +1101,7 @@ Return JSON with these fields:
     metadata: (parsed.metadata as Record<string, unknown>) ?? undefined,
     write_source: args.write_source,
     write_agent: args.write_agent,
-    memory_class: (parsed.memory_class as any) ?? "evidence",
+    memory_class: parsedClass,
   });
 }
 
@@ -1146,9 +1152,9 @@ Return a JSON object with:
   // Store everything via auto_capture
   const result = await autoCapture({
     session_summary: (parsed.summary as string) ?? "Brain dump extraction",
-    action_items: (parsed.action_items as any[]) ?? [],
+    action_items: (parsed.action_items as Array<{ title: string; assignee?: string; due_date?: string; importance: "high" | "medium" | "low" }>) ?? [],
     decisions: (parsed.decisions as string[]) ?? [],
-    people_mentioned: (parsed.people as any[]) ?? [],
+    people_mentioned: (parsed.people as Array<{ name: string; context?: string }>) ?? [],
     source_platform: args.source_platform ?? "manual",
     write_agent: args.write_agent,
     source_ref: args.source_ref,
