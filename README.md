@@ -121,26 +121,79 @@ npm start
 | `ACP_BRAIN_TRUSTED_AGENTS` | (empty) | Comma-separated agent names that bypass review |
 | `ACP_BRAIN_MAX_DAILY_WRITES` | `100` | Max writes per agent per day |
 
-## OpenClaw MCP Configuration
+## Agent Setup
 
-Add to your `openclaw.json` to give agents access:
+### Amazon Quick (Desktop App)
+
+Amazon Quick connects to ACP Brain as a custom MCP server.
+
+**Settings → Capabilities → MCP → + Add MCP:**
+
+| Field | Value |
+|-------|-------|
+| Connection type | Local (stdio) |
+| ID | `acp-brain` |
+| Name | `ACP Brain` |
+| Command | Path to `tsx` (e.g., `/path/to/acp-brain/node_modules/.bin/tsx`) |
+| Arguments | `/path/to/acp-brain/src/index.ts` |
+| Timeout | 60 |
+
+**Environment variables:**
+
+| Key | Value |
+|-----|-------|
+| `ACP_BRAIN_TRANSPORT` | `stdio` |
+| `DATABASE_URL` | `postgresql://localhost:5432/openbrain` |
+| `AWS_REGION` | `us-east-1` |
+| `ACP_BRAIN_DEFAULT_OWNER` | Your alias |
+
+Start a new conversation after adding — all 19 tools will be available.
+
+### Kiro (Coding Agent IDE)
+
+Add to `~/.kiro/settings/mcp.json`:
 
 ```json
 {
   "mcpServers": {
     "acp-brain": {
-      "command": "tsx",
+      "command": "/path/to/acp-brain/node_modules/.bin/tsx",
       "args": ["/path/to/acp-brain/src/index.ts"],
       "env": {
+        "ACP_BRAIN_TRANSPORT": "stdio",
         "DATABASE_URL": "postgresql://localhost:5432/openbrain",
-        "AWS_REGION": "us-west-2",
-        "ACP_BRAIN_DEFAULT_OWNER": "your-username",
-        "ACP_BRAIN_TRUSTED_AGENTS": "quickwork,sync-my-2x2"
+        "AWS_REGION": "us-east-1",
+        "ACP_BRAIN_DEFAULT_OWNER": "your-alias"
       }
     }
   }
 }
 ```
+
+Restart Kiro or reconnect MCP servers from the command palette.
+
+### OpenClaw (Agentic Compute Platform)
+
+Add to your agent's MCP configuration:
+
+```json
+{
+  "mcpServers": {
+    "acp-brain": {
+      "command": "/path/to/acp-brain/node_modules/.bin/tsx",
+      "args": ["/path/to/acp-brain/src/index.ts"],
+      "env": {
+        "ACP_BRAIN_TRANSPORT": "stdio",
+        "DATABASE_URL": "postgresql://localhost:5432/openbrain",
+        "AWS_REGION": "us-east-1",
+        "ACP_BRAIN_DEFAULT_OWNER": "your-alias"
+      }
+    }
+  }
+}
+```
+
+OpenClaw agents will automatically discover all 19 tools on connection.
 
 ## Schema
 
