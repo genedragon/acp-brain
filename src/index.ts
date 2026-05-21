@@ -460,6 +460,20 @@ server.registerTool(
 // Start — HTTP transport (runs as a persistent daemon)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Stdio transport (for local MCP clients like QuickWork, Kiro)
+// ---------------------------------------------------------------------------
+if (process.env.ACP_BRAIN_TRANSPORT === "stdio") {
+  const transport = new StdioServerTransport();
+  server.connect(transport).then(() => {
+    console.error("ACP Brain MCP server running (stdio transport)");
+  }).catch((err) => {
+    console.error("Fatal error:", err);
+    shutdown().finally(() => process.exit(1));
+  });
+} else {
+// HTTP transport (default — for remote access via SSE/StreamableHTTP)
+
 const PORT = parseInt(process.env.ACP_BRAIN_PORT || "18790", 10);
 const transports: Record<string, StreamableHTTPServerTransport> = {};
 let httpServer: ReturnType<typeof import('http').createServer> | null = null;
@@ -565,3 +579,4 @@ process.on("SIGTERM", () => {
   }
   shutdown().finally(() => process.exit(0));
 });
+} // end else (HTTP transport)
